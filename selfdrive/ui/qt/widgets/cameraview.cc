@@ -31,21 +31,25 @@ const char frame_fragment_shader[] =
   "#version 330 core\n"
 #else
   "#version 300 es\n"
+  "#extension GL_OES_EGL_image_external_essl3 : enable\n"
+  //"#extension GL_ARB_fragment_coord_conventions\n"
   "precision mediump float;\n"
 #endif
-  "uniform sampler2D uTextureY;\n"
+  /*"uniform sampler2D uTextureY;\n"
   "uniform sampler2D uTextureU;\n"
-  "uniform sampler2D uTextureV;\n"
+  "uniform sampler2D uTextureV;\n"*/
+  //"uniform samplerExternalOES uTexture;\n"
+  "uniform sampler2D uTexture;\n"
   "in vec2 vTexCoord;\n"
   "out vec4 colorOut;\n"
   "void main() {\n"
-  "  float y = texture(uTextureY, vTexCoord).r;\n"
-  "  float u = texture(uTextureU, vTexCoord).r - 0.5;\n"
-  "  float v = texture(uTextureV, vTexCoord).r - 0.5;\n"
+  "  float y = texture(uTexture, vTexCoord).b;\n"
+  "  float u = texture(uTexture, vTexCoord).r - 0.5;\n"
+  "  float v = texture(uTexture, vTexCoord).a - 0.5;\n"
   "  float r = y + 1.402 * v;\n"
   "  float g = y - 0.344 * u - 0.714 * v;\n"
   "  float b = y + 1.772 * u;\n"
-  "  colorOut = vec4(r, g, b, 1.0);\n"
+  "  colorOut = vec4(r, g, vTexCoord.r*0.3, 1.0);\n"
   "}\n";
 
 const mat4 device_transform = {{
@@ -181,6 +185,8 @@ void CameraViewWidget::hideEvent(QHideEvent *event) {
   }
 }
 
+#include <EGL/egl.h>
+
 void CameraViewWidget::updateFrameMat(int w, int h) {
   if (zoomed_view) {
     if (stream_type == VISION_STREAM_DRIVER) {
@@ -221,13 +227,43 @@ void CameraViewWidget::paintGL() {
   glBindVertexArray(frame_vao);
 
   glUseProgram(program->programId());
-  uint8_t *address[3] = {latest_frame->y, latest_frame->u, latest_frame->v};
+  /*uint8_t *address[3] = {latest_frame->y, latest_frame->u, latest_frame->v};
   for (int i = 0; i < 3; ++i) {
     glActiveTexture(GL_TEXTURE0 + i);
     glBindTexture(GL_TEXTURE_2D, textures[i]);
     int width = i == 0 ? stream_width : stream_width / 2;
     int height = i == 0 ? stream_height : stream_height / 2;
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED, GL_UNSIGNED_BYTE, address[i]);
+    assert(glGetError() == GL_NO_ERROR);
+  }*/
+  //for (int i = 0; i < 3; ++i) {
+  //assert(eglDisplayExtensionEnabled(eglGetCurrentDisplay(), "EGL_KHR_gl_texture_2D_image"));
+  int i = 0; {
+    glActiveTexture(GL_TEXTURE0 + i);
+    //glBindTexture(GL_TEXTURE_2D, textures[i]);
+    //glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, latest_frame->egl_image);
+    #define GL_TEXTURE_EXTERNAL_OES           0x8D65
+    #define USE_TEX GL_TEXTURE_2D
+    glBindTexture(USE_TEX, textures[i]);
+    glEGLImageTargetTexture2DOES(USE_TEX, latest_frame->egl_image);
+    int w=-1,h=-1,fmt=-1,d=-1;
+    glGetTexLevelParameteriv(USE_TEX, 0, GL_TEXTURE_WIDTH, &w);
+    glGetTexLevelParameteriv(USE_TEX, 0, GL_TEXTURE_HEIGHT, &h);
+    glGetTexLevelParameteriv(USE_TEX, 0, GL_TEXTURE_DEPTH, &d);
+    glGetTexLevelParameteriv(USE_TEX, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt);
+    printf("%dx%dx%d fmt:%d\n", w, h, d, fmt);
+
+    glTexParameteri(USE_TEX, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(USE_TEX, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameterf(USE_TEX, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameterf(USE_TEX, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    /*int w=-1, h=-1, fmt, rs=-1, gs=-1, bs=-1, sz;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_BUFFER_SIZE, &sz);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &fmt);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+    printf("%dx%d fmt:%d rs:%x gs:%x bs:%x  sz:%d\n", w, h, fmt, rs, gs, bs, sz);*/
+    //printf("bind image %p error %x\n", latest_frame->egl_image, glGetError());
     assert(glGetError() == GL_NO_ERROR);
   }
 
@@ -237,7 +273,7 @@ void CameraViewWidget::paintGL() {
   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, (const void *)0);
   glDisableVertexAttribArray(0);
   glBindVertexArray(0);
-  glBindTexture(GL_TEXTURE_2D, 0);
+  glBindTexture(USE_TEX, 0);
   glActiveTexture(GL_TEXTURE0);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 }
@@ -248,15 +284,21 @@ void CameraViewWidget::vipcConnected(VisionIpcClient *vipc_client) {
   stream_width = vipc_client->buffers[0].width;
   stream_height = vipc_client->buffers[0].height;
 
+  // import into OpenGL
+  for (int i = 0; i < vipc_client->num_buffers; i++) {
+    vipc_client->buffers[i].init_gl();
+  }
+
   for (int i = 0; i < 3; ++i) {
+    /*glBindTexture(GL_TEXTURE_2D, textures[i]);
     glBindTexture(GL_TEXTURE_2D, textures[i]);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    int width = i == 0 ? stream_width : stream_width / 2;
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);*/
+    /*int width = i == 0 ? stream_width : stream_width / 2;
     int height = i == 0 ? stream_height : stream_height / 2;
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);*/
     assert(glGetError() == GL_NO_ERROR);
   }
 
